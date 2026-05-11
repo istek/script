@@ -9,7 +9,6 @@ payload:
 - '+.ios.chat.openai.com'
 - '+.ai.com'
 - '+.auth0.com'
-- '+.challenges.cloudflare.com'
 - '+.client-api.arkoselabs.com'
 - '+.events.statsigapi.net'
 - '+.featuregates.org'
@@ -27,3 +26,11 @@ payload:
 
 # chatGPT
 - '+.oaiusercontent.com'
+
+# copilot
+- 'copilot.microsoft.com'
+- '+.static.microsoft'
+- '+.msecnd.net'
+
+# iconscout
+- '+.iconscout.com'
