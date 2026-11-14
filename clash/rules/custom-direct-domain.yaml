@@ -6,6 +6,7 @@ payload:
 
 # strava 骑行
 - '+.strava.com'
+- '+.mapbox.com'
 
 # xbox 下载地址
 - '+.xvcf1.xboxlive.com'
@@ -25,3 +26,12 @@ payload:
 
 # 京东
 - '+.gia.jd.com'
+
+# linuxdo
+- '+.linuxdo.org'
+
+- '+.m-team.cc'
+
+#Minecraft
+- +.minecraft.net
+- +.mojang.com
