@@ -15,17 +15,32 @@
  *  - 保留订阅原有 proxies，过滤广告假节点、处理重名节点；
  *  - 生成完整策略组（节点选择 / 自动测速 / 故障转移 / 分流组 / 广告拦截 / 漏网之鱼）；
  *  - 生成完整 DNS(fake-ip) / sniffer / 基础配置 / 可选 TUN；
- *  - 生成分流规则：局域网 → 广告 → AI / 电报 / 流媒体 → 国内直连 → 境外代理 → MATCH；
+ *  - 生成分流规则：局域网 → 广告 → AI / 电报 / 流媒体 / 微软 / GitHub → 国内直连 → 境外代理 → MATCH；
  *  - 可选：引用 ACL4SSR 远程规则集增强分流；可选：按地区自动分组。
  *
+ * 【参数（$arguments）】
+ *  Sub-Store 用「脚本链接 # 后面」传参，脚本内通过全局变量 $arguments 读取（注意是 # 不是 ?）：
+ *    https://.../mihomo-override.js#allowregion=true&enableLoadBalance=1&enableFallbackGroup=false
+ *  无值参数等价于 true（#allowregion）；布尔支持 true/false、1/0、yes/no、on/off。
+ *  也支持 JSON 对象或 "a=1&b=2" 字符串形式的 $arguments，以及 $options / main 的 context 参数。
+ *
+ *  常用参数（别名 → 实际变量）：
+ *    allowregion              → enableRegionGroups   按地区自动分组
+ *    enableFallbackGroup      → 同名（别名 allowfallback）故障转移组
+ *    enableLoadBalance        → 同名（别名 allowbalance / loadbalance）负载均衡组
+ *    tun → tunEnable，remoterules → useRemoteRuleSets
+ *  实际上 CFG 里所有标量项都能用同名参数覆盖（大小写不敏感），例如：
+ *    #mixedPort=7891&dnsMode=redir-host&testUrl=https%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204
+ *  数组项用 | 分隔：#extraDirectDomains=a.com|b.com
+ *
  * 【兼容性】
- *  - 入口固定为 main(config) → return config（Sub-Store 文件/组合订阅的标准脚本接口）；
+ *  - 入口为 main(config, context) → return config（Sub-Store 文件/组合订阅的标准脚本接口）；
  *  - 全脚本使用 ES5 语法，不依赖 $utils / fetch / 箭头函数 / 可选链，
  *    以兼容 Sub-Store 在浏览器端与 Node 端不同的 JS 沙箱；
  *  - 若传入的是节点数组，会自动包装成 { proxies: [...] }；
  *  - 若传入的是 YAML 字符串，会尝试用 Sub-Store 的 $utils.yaml 解析。
  *
- * 【怎么改】只改下面 CFG 里的值即可，不要动后面的逻辑。
+ * 【怎么改】优先用参数；也可直接改下面 CFG 里的默认值（参数优先级更高）。
  * =============================================================================
  */
 
@@ -91,7 +106,9 @@ var CFG = {
   excludeTypes: ['direct', 'reject', 'relay', 'selector', 'urltest', 'fallback', 'loadbalance'],
 
   // ---------- 健康检查 ----------
-  testUrl: 'http://www.gstatic.com/generate_204',
+  // Cloudflare 官方连通性检测端点：HTTPS、返回 204、无响应体，测速轻量且不易被劫持
+  testUrl: 'https://cp.cloudflare.com/generate_204',
+  testStatus: 204,               // expected-status；若换用 cdn-cgi/trace(200) 请改成 200 或 '*'
   testInterval: 300,
   testTolerance: 50,
 
@@ -113,6 +130,8 @@ var CFG = {
     media: '🎬 流媒体',
     ai: '🤖 AI 服务',
     telegram: '📲 电报消息',
+    microsoft: '🪟 微软服务',
+    github: '🐙 GitHub',
     apple: '🍎 苹果服务',
     cn: '🇨🇳 国内网站',
     ads: '🛑 广告拦截',
@@ -140,7 +159,32 @@ var CFG = {
   geositeAi: ['openai'],
   // 只保留各版本 geosite.dat 必然存在的类别；需要更多可自行加 spotify / disney / hulu 等
   geositeMedia: ['netflix', 'youtube'],
-  geositeApple: ['apple']
+  geositeApple: ['apple'],
+  // 微软 / GitHub 默认只用域名规则；确认你的 geosite.dat 含这两个类别时可填 ['microsoft'] / ['github']
+  geositeMicrosoft: [],
+  geositeGithub: [],
+
+  // ---------- 微软 / GitHub 分流组 ----------
+  // 组类型：'select'(手动选择的分流组) / 'url-test'(自动测速选节点) / 'fallback' / 'load-balance'
+  // 换成 url-test 等类型时，组内放全部真实节点并使用上面的健康检查地址。
+  microsoftGroupType: 'select',
+  githubGroupType: 'select',
+  microsoftDirectFirst: true,    // 微软服务默认直连（OneDrive / Office 可手动切代理）
+  githubDirectFirst: false,      // GitHub 默认走代理
+  microsoftDomains: [
+    'microsoft.com', 'microsoftonline.com', 'office.com', 'office.net', 'office365.com',
+    'outlook.com', 'live.com', 'live.net', 'hotmail.com', 'msn.com',
+    'bing.com', 'bing.net', 'azure.com', 'azure.net', 'azureedge.net',
+    'windows.com', 'windows.net', 'windowsupdate.com', 'msftconnecttest.com', 'msftncsi.com',
+    'msauth.net', 'msftauth.net', 'onedrive.com', '1drv.ms', 'sharepoint.com',
+    'svc.ms', 'sfx.ms', 'msecnd.net', 'xbox.com', 'xboxlive.com',
+    'skype.com', 'visualstudio.com', 'vsassets.io', 'vscode.dev'
+  ],
+  githubDomains: [
+    'github.com', 'githubusercontent.com', 'github.io', 'githubassets.com',
+    'githubapp.com', 'github.blog', 'githubstatus.com', 'githubcopilot.com',
+    'github.dev', 'github.net', 'ghcr.io', 'git.io'
+  ]
 };
 
 // 按地区自动分组时的关键字（enableRegionGroups = true 时生效）
@@ -219,6 +263,141 @@ function normalize(config) {
   }
   if (!config || typeof config !== 'object') return {};
   return config;
+}
+
+// -----------------------------------------------------------------------------
+// 2.1 参数系统：Sub-Store 的 $arguments（脚本链接 # 参数）→ 覆盖 CFG
+// -----------------------------------------------------------------------------
+// 短别名（键一律小写）；未列出的参数按 CFG 同名键匹配，大小写不敏感
+var PARAM_ALIAS = {
+  'allowregion': 'enableRegionGroups',
+  'region': 'enableRegionGroups',
+  'allowfallback': 'enableFallbackGroup',
+  'allowbalance': 'enableLoadBalance',
+  'loadbalance': 'enableLoadBalance',
+  'tun': 'tunEnable',
+  'remoterules': 'useRemoteRuleSets'
+};
+
+var CFG_DEFAULTS = null;
+
+function cloneCfgValue(v) {
+  return isArray(v) ? v.slice(0) : v;
+}
+
+function snapshotCfg() {
+  if (CFG_DEFAULTS) return;
+  CFG_DEFAULTS = {};
+  for (var k in CFG) {
+    if (Object.prototype.hasOwnProperty.call(CFG, k)) CFG_DEFAULTS[k] = cloneCfgValue(CFG[k]);
+  }
+}
+
+function resetCfg() {
+  snapshotCfg();
+  for (var k in CFG_DEFAULTS) {
+    if (Object.prototype.hasOwnProperty.call(CFG_DEFAULTS, k)) CFG[k] = cloneCfgValue(CFG_DEFAULTS[k]);
+  }
+}
+
+function parseQuery(text) {
+  var out = {};
+  var s = String(text).replace(/^[?#&]+/, '');
+  var parts = s.split('&');
+  for (var i = 0; i < parts.length; i++) {
+    if (!parts[i]) continue;
+    var eq = parts[i].indexOf('=');
+    var key, val;
+    if (eq < 0) {
+      key = parts[i];
+      val = true;                       // #allowregion 等价于 true
+    } else {
+      key = parts[i].slice(0, eq);
+      var raw = parts[i].slice(eq + 1).replace(/\+/g, ' ');
+      try { val = decodeURIComponent(raw); } catch (e) { val = raw; }
+    }
+    key = String(key).replace(/^\s+|\s+$/g, '');
+    if (typeof val === 'string') val = val.replace(/^\s+|\s+$/g, '');
+    if (key) out[key] = val;
+  }
+  return out;
+}
+
+function toArgObject(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    var s = value.replace(/^\s+|\s+$/g, '');
+    if (s.charAt(0) === '{') {
+      try {
+        var obj = JSON.parse(s);
+        return obj && typeof obj === 'object' ? obj : {};
+      } catch (e) { return {}; }
+    }
+    return parseQuery(s);
+  }
+  if (typeof value === 'object') return value;
+  return {};
+}
+
+// 用 typeof 保护未注入的全局变量，避免在某些沙箱里直接引用报 ReferenceError
+function readGlobal(name) {
+  try {
+    if (name === '$arguments' && typeof $arguments !== 'undefined') return $arguments;
+    if (name === '$options' && typeof $options !== 'undefined') return $options;
+  } catch (e) {}
+  return null;
+}
+
+function castValue(raw, old) {
+  if (typeof raw === 'boolean') return raw;
+  var s = String(raw);
+  var low = s.toLowerCase();
+  if (typeof old === 'boolean') {
+    return low === 'true' || low === '1' || low === 'yes' || low === 'on' || low === '';
+  }
+  if (typeof old === 'number') {
+    if (/^\d+$/.test(s)) return parseInt(s, 10);
+    if (s === '*' || /^[\d\/\-]+$/.test(s)) return s; // expected-status 支持 200/302 等
+    return old;
+  }
+  if (isArray(old)) return s === '' ? [] : s.split('|');
+  return s;
+}
+
+function applyArguments(context) {
+  resetCfg(); // 同一沙箱多次执行时，避免上一次的参数残留
+
+  var args = {};
+  merge(args, toArgObject(readGlobal('$options')));
+  if (context && typeof context === 'object') {
+    merge(args, toArgObject(context.$arguments || context.args || context.query || context.params || context));
+  }
+  merge(args, toArgObject(readGlobal('$arguments'))); // 脚本链接 # 参数，优先级最高
+
+  var keyMap = {};
+  for (var k in CFG) {
+    if (Object.prototype.hasOwnProperty.call(CFG, k)) keyMap[k.toLowerCase()] = k;
+  }
+
+  var applied = [];
+  var ignored = [];
+  for (var name in args) {
+    if (!Object.prototype.hasOwnProperty.call(args, name)) continue;
+    var raw = args[name];
+    var low = String(name).toLowerCase();
+    var target = PARAM_ALIAS[low] || keyMap[low];
+    if (!target || !Object.prototype.hasOwnProperty.call(CFG, target) ||
+        (raw && typeof raw === 'object') ||
+        (CFG[target] && typeof CFG[target] === 'object' && !isArray(CFG[target]))) {
+      ignored.push(name);
+      continue;
+    }
+    CFG[target] = castValue(raw, CFG[target]);
+    applied.push(name + ' -> ' + target + '=' + CFG[target]);
+  }
+  if (applied.length) log('应用参数: ' + applied.join(', '));
+  if (ignored.length) log('忽略 ' + ignored.length + ' 个无关参数: ' + ignored.slice(0, 5).join(', '));
+  return applied;
 }
 
 // -----------------------------------------------------------------------------
@@ -400,7 +579,8 @@ function buildGroups(names, providerNames) {
   var health = {
     'url': CFG.testUrl,
     'interval': CFG.testInterval,
-    'tolerance': CFG.testTolerance
+    'tolerance': CFG.testTolerance,
+    'expected-status': CFG.testStatus
   };
 
   // 自动测速 / 故障转移 / 负载均衡：只放真实节点
@@ -408,12 +588,17 @@ function buildGroups(names, providerNames) {
   groups.push(makeGroup('url-test', G.auto, autoMembers, providerNames, health));
   if (CFG.enableFallbackGroup) {
     groups.push(makeGroup('fallback', G.fallback, copyArray(names), providerNames, {
-      'url': CFG.testUrl, 'interval': CFG.testInterval
+      'url': CFG.testUrl,
+      'interval': CFG.testInterval,
+      'expected-status': CFG.testStatus
     }));
   }
   if (CFG.enableLoadBalance) {
     groups.push(makeGroup('load-balance', G.balance, copyArray(names), providerNames, {
-      'url': CFG.testUrl, 'interval': CFG.testInterval, 'strategy': 'consistent-hashing'
+      'url': CFG.testUrl,
+      'interval': CFG.testInterval,
+      'expected-status': CFG.testStatus,
+      'strategy': 'consistent-hashing'
     }));
   }
 
@@ -434,10 +619,29 @@ function buildGroups(names, providerNames) {
     if (directFirst) m = ['DIRECT'].concat(m); // 苹果 / 国内服务默认直连
     groups.push(makeGroup('select', name, m, providerNames));
   }
+  // 微软 / GitHub 组默认是 select 分流组；把类型改成 url-test / fallback / load-balance
+  // 即可变成「按健康检查自动选节点」的测试组，组内放全部真实节点。
+  function serviceGroup(name, type, directFirst) {
+    if (type === 'url-test' || type === 'fallback' || type === 'load-balance') {
+      var extra = {
+        'url': CFG.testUrl,
+        'interval': CFG.testInterval,
+        'expected-status': CFG.testStatus
+      };
+      if (type === 'url-test') extra['tolerance'] = CFG.testTolerance;
+      if (type === 'load-balance') extra['strategy'] = 'consistent-hashing';
+      groups.push(makeGroup(type, name, copyArray(names), providerNames, extra));
+    } else {
+      sub(name, [G.overseas, 'DIRECT'], directFirst);
+    }
+  }
+
   sub(G.overseas, ['DIRECT']);
   sub(G.media, [G.overseas, 'DIRECT']);
   sub(G.ai, [G.overseas, 'DIRECT']);
   sub(G.telegram, [G.overseas, 'DIRECT']);
+  serviceGroup(G.microsoft, CFG.microsoftGroupType, CFG.microsoftDirectFirst);
+  serviceGroup(G.github, CFG.githubGroupType, CFG.githubDirectFirst);
   sub(G.apple, [G.overseas], true);
   sub(G.cn, [G.overseas], true);
   groups.push(makeGroup('select', G.ads, ['REJECT', 'DIRECT', G.proxy], providerNames));
@@ -529,6 +733,12 @@ function buildRules() {
   if (CFG.useRemoteRuleSets) r.push('RULE-SET,apple,' + G.apple);
   if (CFG.useGeosite) r = r.concat(geositeRules(CFG.geositeApple, G.apple));
 
+  // 微软 / GitHub 分流（必须排在国内直连与 geolocation-!cn 兜底之前）
+  r = r.concat(domainRules(CFG.microsoftDomains, G.microsoft, 'DOMAIN-SUFFIX'));
+  if (CFG.useGeosite) r = r.concat(geositeRules(CFG.geositeMicrosoft, G.microsoft));
+  r = r.concat(domainRules(CFG.githubDomains, G.github, 'DOMAIN-SUFFIX'));
+  if (CFG.useGeosite) r = r.concat(geositeRules(CFG.geositeGithub, G.github));
+
   // 4. 国内直连
   if (CFG.useRemoteRuleSets) {
     r.push('RULE-SET,cn-domain,DIRECT');
@@ -552,7 +762,8 @@ function buildRules() {
 // -----------------------------------------------------------------------------
 // 4. 入口：Sub-Store 调用 main(config)，必须返回配置对象
 // -----------------------------------------------------------------------------
-function main(config) {
+function main(config, context) {
+  applyArguments(context); // 每次执行都重新解析 $arguments，参数优先于 CFG 默认值
   var c = normalize(config);
 
   // 节点处理
@@ -594,6 +805,9 @@ function main(config) {
       ' rules=' + c.rules.length +
       ' dns=' + CFG.dnsMode +
       ' tun=' + CFG.tunEnable +
-      ' remote_ruleset=' + CFG.useRemoteRuleSets);
+      ' region=' + CFG.enableRegionGroups +
+      ' fallback=' + CFG.enableFallbackGroup +
+      ' balance=' + CFG.enableLoadBalance +
+      ' test=' + CFG.testUrl);
   return c;
 }
